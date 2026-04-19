@@ -129,9 +129,30 @@ export class ObsidianBridge extends React.Component<ObsidianBridgeProps, Obsidia
         });
     }
 
+    private async addTaskToFile(path: string, section: string, taskStr: string): Promise<void> {
+        const content = await this.app.vault.adapter.read(path);
+        let lines = content.split('\n');
+        if (!lines.includes(section)) {
+            lines.push(section);
+        }
+        const sectionIndex = lines.indexOf(section);
+        if (sectionIndex !== -1 && !lines.slice(sectionIndex + 1).some(line => line.startsWith("- [ ]"))) {
+            lines.splice(sectionIndex + 1, 0, taskStr);
+        }
+        await this.app.vault.adapter.write(path, lines.join("\n"));
+        this.onUpdateTasks();
+    }
+
+    private getTemplater() {
+        //@ts-ignore
+        const templaterPlugin = this.app.plugins.plugins["templater-obsidian"];
+        return templaterPlugin?.templater;
+    }
+
     handleCreateNewTask(path: string, append: string) {
         const taskStr = "- [ ] " + append;
         const section = this.state.userOptions.sectionForNewTasks;
+        const useTemplater = this.state.userOptions.useTemplater;
         this.app.vault.adapter.exists(path).then(exist => {
             if (!exist) {
                 new CreateFileModal(
@@ -139,17 +160,88 @@ export class ObsidianBridge extends React.Component<ObsidianBridgeProps, Obsidia
                     path,
                     section,
                     taskStr,
-                    () => {
-                        const content = section + "\n" + taskStr;
-                        this.app.vault.create(path, content)
-                            .then(() => {
-                                this.onUpdateTasks();
-                                // Open the newly created file
+                    async () => {
+                        if (useTemplater) {
+                            const templater = this.getTemplater();
+                            if (!templater) {
+                                new Notice("Templater plugin not found. Please enable Templater plugin.", 5000);
+                                return;
+                            }
+
+                            const templateFilePath = this.state.userOptions.templaterTemplateFile;
+                            if (!templateFilePath) {
+                                new Notice("Please select a Templater template file in the plugin settings.", 5000);
+                                return;
+                            }
+
+                            const templateFile = this.app.vault.getAbstractFileByPath(templateFilePath);
+                            if (!templateFile) {
+                                new Notice("Template file not found: " + templateFilePath, 5000);
+                                return;
+                            }
+
+                            const lastSlash = path.lastIndexOf('/');
+                            const folder = lastSlash > 0 ? path.substring(0, lastSlash) : '';
+                            const filename = path.substring(lastSlash + 1, path.lastIndexOf('.md'));
+                            const folderObj = folder ? this.app.vault.getAbstractFileByPath(folder) : null;
+
+                            try {
+                                await templater.create_new_note_from_template(
+                                    templateFile,
+                                    folderObj,
+                                    filename,
+                                    true
+                                );
+
+                                // Verify file was created and template was applied
+                                const file = this.app.vault.getAbstractFileByPath(path);
+                                if (!file) {
+                                    new Notice("File was not created properly by Templater.", 5000);
+                                    return;
+                                }
+
+                                // Verify template was applied with retry mechanism
+                                let content = '';
+                                let attempts = 0;
+                                const maxAttempts = 5;
+                                while (attempts < maxAttempts) {
+                                    content = await this.app.vault.adapter.read(path);
+                                    if (content && content.trim().length > 0) {
+                                        break;
+                                    }
+                                    attempts++;
+                                    if (attempts < maxAttempts) {
+                                        await new Promise(resolve => setTimeout(resolve, 200));
+                                    }
+                                }
+                              
+                                if (!content || content.trim().length === 0) {
+                                    new Notice("Template was not applied properly after multiple retries.", 5000);
+                                    return;
+                                }
+
+                                // Add task to the file
+                                await this.addTaskToFile(path, section, taskStr);
+
+                                // Open the file
                                 this.app.workspace.openLinkText('', path);
-                            })
-                            .catch(reason => {
-                                return new Notice("Error when creating file " + path + " for new task: " + reason, 5000);
-                            });
+
+                            } catch (reason) {
+                                new Notice("Error when creating file with Templater: " + reason, 5000);
+                            }
+                        } else {
+                            // Original behavior: create file with section and task
+                            const content = section + "\n" + taskStr;
+                            this.app.vault.create(path, content)
+                                .then(() => {
+                                    this.onUpdateTasks();
+                                    // Open the newly created file
+                                    this.app.workspace.openLinkText('', path);
+                                })
+                                .catch(reason => {
+                                    return new Notice("Error when creating file " + path + " for new task: " + reason, 5000);
+                                });
+                        }
                     },
                     () => {
                         // User cancelled, do nothing
@@ -157,6 +249,7 @@ export class ObsidianBridge extends React.Component<ObsidianBridgeProps, Obsidia
                 ).open();
                 return;
             }
+            // File exists, add task to existing file
             this.app.vault.adapter.read(path).then(content => {
                 const lines = content.split('\n');
                 lines.splice(lines.indexOf(section) + 1, 0, taskStr);
