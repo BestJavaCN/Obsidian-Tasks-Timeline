@@ -1,12 +1,58 @@
 import { Model } from 'backbone';
 import moment from 'moment';
-import { App, ItemView, Notice, Pos } from 'obsidian';
+import { App, ItemView, Modal, Notice, Pos } from 'obsidian';
 import * as React from 'react';
 import { UserOption, defaultUserOptions } from '../../src/settings';
 import * as TaskMapable from '../../utils/taskmapable';
 import { TaskDataModel } from '../../utils/tasks';
 import { QuickEntryHandlerContext, TaskItemEventHandlersContext } from './components/context';
 import { TimelineView } from './components/timelineview';
+
+class CreateFileModal extends Modal {
+    private path: string;
+    private section: string;
+    private taskStr: string;
+    private onConfirm: () => void;
+    private onCancel: () => void;
+
+    constructor(app: App, path: string, section: string, taskStr: string, onConfirm: () => void, onCancel: () => void) {
+        super(app);
+        this.path = path;
+        this.section = section;
+        this.taskStr = taskStr;
+        this.onConfirm = onConfirm;
+        this.onCancel = onCancel;
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: '创建新笔记' });
+        contentEl.createEl('p', { text: `是否要创建一个路径为 ${this.path} 的笔记。` });
+
+        const buttonContainer = contentEl.createDiv({ cls: 'modal-button-container' });
+        buttonContainer.createEl('button', {
+            text: '创建',
+            cls: 'mod-cta'
+        }).addEventListener('click', () => {
+            this.close();
+            this.onConfirm();
+        });
+
+        buttonContainer.createEl('button', {
+            text: '取消',
+            cls: 'mod-cta',
+            attr: { style: 'margin-left: 8px;' }
+        }).addEventListener('click', () => {
+            this.close();
+            this.onCancel();
+        });
+    }
+
+    onClose() {
+        const { contentEl } = this;
+        contentEl.empty();
+    }
+}
 
 const defaultObsidianBridgeProps = {
     plugin: {} as ItemView,
@@ -87,15 +133,28 @@ export class ObsidianBridge extends React.Component<ObsidianBridgeProps, Obsidia
         const taskStr = "- [ ] " + append;
         const section = this.state.userOptions.sectionForNewTasks;
         this.app.vault.adapter.exists(path).then(exist => {
-            if (!exist && confirm("No such file: " + path + ". Would you like to create it?")) {
-                const content = section + "\n" + taskStr;
-                this.app.vault.create(path, content)
-                    .then(() => {
-                        this.onUpdateTasks();
-                    })
-                    .catch(reason => {
-                        return new Notice("Error when creating file " + path + " for new task: " + reason, 5000);
-                    });
+            if (!exist) {
+                new CreateFileModal(
+                    this.app,
+                    path,
+                    section,
+                    taskStr,
+                    () => {
+                        const content = section + "\n" + taskStr;
+                        this.app.vault.create(path, content)
+                            .then(() => {
+                                this.onUpdateTasks();
+                                // Open the newly created file
+                                this.app.workspace.openLinkText('', path);
+                            })
+                            .catch(reason => {
+                                return new Notice("Error when creating file " + path + " for new task: " + reason, 5000);
+                            });
+                    },
+                    () => {
+                        // User cancelled, do nothing
+                    }
+                ).open();
                 return;
             }
             this.app.vault.adapter.read(path).then(content => {
@@ -104,6 +163,8 @@ export class ObsidianBridge extends React.Component<ObsidianBridgeProps, Obsidia
                 this.app.vault.adapter.write(path, lines.join("\n"))
                     .then(() => {
                         this.onUpdateTasks();
+                        // Open the file after adding the task
+                        this.app.workspace.openLinkText('', path);
                     })
                     .catch(reason => {
                         return new Notice("Error when writing new tasks to " + path + "." + reason, 5000);
